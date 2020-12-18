@@ -1,0 +1,524 @@
+---
+title: "group project (html)"
+author: "Yichen Huang"
+date: "10/31/2020"
+output: html_document
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(dplyr)
+library(broom)
+library(ggplot2)
+library(splines)
+library(splines2)
+library(ggplot2)
+library(olsrr)
+library(mice)
+library(DescTools)
+summ.MNfit <- function(fit, digits=3){
+  s <- summary(fit)
+  for(i in 2:length(fit$lev))
+  {
+    ##
+    cat("\nLevel", fit$lev[i], "vs. Level", fit$lev[1], "\n")
+    ##
+    betaHat <- s$coefficients[(i-1),]
+    se <- s$standard.errors[(i-1),]
+    zStat <- betaHat /se
+    pval <- 2*pnorm(abs(zStat), lower.tail = FALSE)
+    ##
+    RRR <- exp(betaHat)
+    RRR.lower <- exp(betaHat - qnorm(0.975)*se)
+    RRR.upper <- exp(betaHat + qnorm(0.975)*se)
+    ##
+    results <- cbind(betaHat, se, pval, RRR, RRR.lower, RRR.upper)
+    print(round(results, digits=digits))
+  }  
+}
+```
+
+```{r}
+diabetes <- read.csv("diabetes.csv")
+head(diabetes)
+```
+## Missing Data
+```{r,fig.show='hold',out.width="50%"}
+# Imputation
+diabetes$outcome[diabetes$glyhb < 5.70] <- 1
+diabetes$outcome[diabetes$glyhb >=5.70 & diabetes$glyhb <=6.50] <-2
+diabetes$outcome[diabetes$glyhb >6.50] <-3
+
+diabetes2 <- diabetes %>% mutate("diabetes"=ifelse(diabetes$glyhb > 6.50, 1,0)) %>% 
+  mutate("BMI"=(weight*0.453592)/(height*0.0254)^2) %>% mutate("w_h_ratio"=waist/hip) %>% 
+  mutate("lnglyhb"=log(glyhb)) %>%
+  select(c("id","glyhb", "lnglyhb","w_h_ratio","age","BMI","chol","hdl" ,"diabetes", "outcome","gender"))
+head(diabetes2)
+md.pattern(diabetes2)
+tempData <- mice(diabetes2, m=5, method = 'pmm', seed=96324)
+dat_imp <- complete(tempData,action=1)  #join the first dataset
+head(dat_imp)
+xyplot(tempData, lnglyhb ~ w_h_ratio + age+ chol+BMI)
+densityplot(tempData)
+```
+
+```{r, eval=FALSE}
+# Plot with complete dataset (joining the first dataset)
+dat_imp$female[dat_imp$gender=="female"] <- 1
+dat_imp$female[dat_imp$gender=="male"] <- 0
+hist(dat_imp$lnglyhb, main = "Histogram of imputated log(glycosylated Hemoglobin)")
+scatter.smooth(dat_imp$w_h_ratio, dat_imp$lnglyhb, col="brown", xlab = "waist/hip ratio", 
+               ylab = "log(Glycosylated Hemoglobin)")
+boxplot(dat_imp$glyhb~ dat_imp$female, col="orange",xlab = "Female=1", ylab = "Glycosylated Hemoglobin")
+```
+
+
+
+
+
+
+## Modeling
+
+Diabetes damages arteries and makes them targets for hardening, called atherosclerosis, which can then cause high blood pressure. $\\$
+Diabetes confounders: age, gender, TC, BMI $\\$
+Hypertension confounders: serum total cholesterol (TC), serum HDL-cholesterol (HDL-C), body mass index (BMI)	$\\$
+
+
+### 1. Linear models 
+```{r,fig.show='hold',out.width="50%"}
+dat <- diabetes %>% mutate(w_h_ratio=waist/hip) %>% filter(!is.na(w_h_ratio) & !is.na(glyhb) & !is.na(chol))
+dat$female[dat$gender=="female"] <- 1
+dat$female[dat$gender=="male"] <- 0
+dat["BMI"]=(dat$weight*0.453592)/(dat$height*0.0254)^2
+dat <- dat %>% filter(!is.na(BMI))
+dat <- dat[order(dat$BMI),]
+
+scatter.smooth(dat$w_h_ratio, dat$glyhb, col="brown", xlab = "waist/hip ratio", 
+               ylab = "Glycosylated Hemoglobin")
+scatter.smooth(dat$age, dat$glyhb, col="blue", xlab = "Age", 
+               ylab = "Glycosylated Hemoglobin")
+boxplot(dat$glyhb~ dat$female, col="orange",xlab = "Female=1", ylab = "Glycosylated Hemoglobin")
+hist(dat$glyhb, xlab = "Glycosolated Hemoglobin", main = "Histogram of glycosylated hemoglobin", col="gray")
+hist(dat$w_h_ratio,xlab="Waist/hip ratio", main="Histogram of waist/hip ratio", col="blue")
+```
+\textcolor{blue}{
+From the histogram of glycosylated hemoglobin, it's strongly skewed to the right. In order to fit a linear regression model, normality and homoscedasticity have to hold. Hence, transformation is done on values of glycosylated hemoglobin with log transformation to approximate normal distribution.
+}
+
+
+
+```{r,fig.show='hold',out.width="50%"}
+# log transformaion on glycosylated hemoglobin (glyhb)
+dat$ln_glyhb <- log(dat$glyhb)
+scatter.smooth(dat$w_h_ratio, dat$ln_glyhb, col="brown", xlab = "waist/hip ratio", 
+               ylab = "ln(Glycosylated Hemoglobin)")
+hist(dat$ln_glyhb, xlab = "ln(Glycosolated Hemoglobin)", main = "Histogram of ln(glycosylated hemoglobin)", col="gray")
+```
+
+```{r}
+library(caret)
+# preprocl <- preProcess(dat[,c("w_h_ratio", "chol", "BMI", "age","ln_glyhb")],method = c("range"))
+#dat_nor <- predict(preprocl, dat[,c("w_h_ratio", "chol", "BMI", "age", "ln_glyhb")])
+#hist(dat_nor$ln_glyhb)
+
+# mod.normal <- lm(ln_glyhb ~ w_h_ratio + age + chol+I(chol^2)+BMI+I(BMI^2), data=dat_nor)
+```
+
+
+### linear model coefficients
+
+```{r}
+mod.wh <- lm(ln_glyhb ~ w_h_ratio,data=dat)
+mod.age <- lm(ln_glyhb ~ age, data=dat)
+mod.wh2 <- lm(ln_glyhb ~ w_h_ratio + I(w_h_ratio^2), data=dat) #no need
+mod.wh_age <- lm(ln_glyhb ~ w_h_ratio + age, data=dat)
+mod.wh_gender <- lm(ln_glyhb ~ w_h_ratio + female, data=dat)
+mod.wh2_age <- lm(ln_glyhb ~ w_h_ratio + I(w_h_ratio^2)+ age, data=dat)
+mod.wh2_age2 <- lm(ln_glyhb ~ w_h_ratio + I(w_h_ratio^2)+age+I(age^2), data=dat)
+mod.int <- lm(ln_glyhb ~ w_h_ratio + age + w_h_ratio*age, data=dat) #no need
+mod.spline_age <- lm(ln_glyhb~ bSpline(w_h_ratio, df=4) +age , data=dat)
+mod.nspline_age <- lm(ln_glyhb~ ns(w_h_ratio, df=4) + age,data=dat)
+mod.spline <- lm(ln_glyhb~bSpline(w_h_ratio,df=4), data=dat)
+mod.wh_age_chol <- lm(ln_glyhb ~ w_h_ratio + age+ chol, data=dat)
+mod.wh_age_chol_bmi <- lm(ln_glyhb ~ w_h_ratio + age+ chol + BMI, data=dat)
+mod.wh_age_chol2_bmi <- lm(ln_glyhb~ w_h_ratio+age+chol+I(chol^2)+BMI, data=dat)
+mod.wh_age_chol2_bmi2 <- lm(ln_glyhb~ w_h_ratio+age+chol+I(chol^2)+BMI+I(BMI^2), data=dat)
+mod.int2 <- lm(ln_glyhb ~ w_h_ratio + age + chol + BMI + chol*w_h_ratio, data=dat) #no need
+mod.int3 <- lm(ln_glyhb ~ w_h_ratio + age + chol+ BMI + BMI*w_h_ratio,data=dat) #no need
+```
+
+```{r,eval=FALSE}
+tidy(mod.wh) %>% mutate('2.5%'=confint(mod.wh)[,1]) %>% mutate('97.5%'=confint(mod.wh)[,2])
+tidy(mod.wh2) %>% mutate('2.5%'=confint(mod.wh2)[,1]) %>% mutate('97.5%'=confint(mod.wh2)[,2])
+tidy(mod.age) %>% mutate('2.5%'=confint(mod.age)[,1]) %>% mutate('97.5%'=confint(mod.age)[,2])
+tidy(mod.wh_age) %>% mutate('2.5%'=confint(mod.wh_age)[,1]) %>% mutate('97.5%'=confint(mod.wh_age)[,2])
+tidy(mod.wh_gender) %>% mutate('2.5%'=confint(mod.wh_gender)[,1]) %>% mutate('97.5%'=confint(mod.wh_gender)[,2])
+tidy(mod.wh2_age) %>% mutate('2.5%'=confint(mod.wh2_age)[,1]) %>% mutate('97.5%'=confint(mod.wh2_age)[,2])
+tidy(mod.wh2_age2) %>% mutate('2.5%'=confint(mod.wh2_age2)[,1]) %>% mutate('97.5%'=confint(mod.wh2_age2)[,2])
+tidy(mod.int) #no need
+tidy(mod.spline_age) %>% mutate('2.5%'=confint(mod.spline_age)[,1]) %>% mutate('97.5%'=confint(mod.spline_age)[,2])
+tidy(mod.nspline_age) %>% mutate('2.5%'=confint(mod.nspline_age)[,1]) %>% mutate('97.5%'=confint(mod.nspline_age)[,2])
+tidy(mod.wh_age_chol)
+tidy(mod.wh_age_chol_bmi)
+tidy(mod.wh_age_chol2_bmi)
+tidy(mod.wh_age_chol2_bmi2) %>% mutate('2.5%'=confint(mod.wh_age_chol2_bmi2)[,1]) %>%
+  mutate('97.5%'=confint(mod.wh_age_chol2_bmi2)[,2])
+tidy(mod.int2) #no need
+tidy(mod.int3) #no need
+anova(mod.wh_age,mod.spline_age)
+anova(mod.wh_age, mod.nspline_age)
+```
+
+```{r}
+#imputated models
+mod.imp.wh <- with(tempData, lm(lnglyhb ~ w_h_ratio))
+mod.imp.wh_age <- with(tempData,lm(lnglyhb ~ w_h_ratio+age))
+mod.imp.wh_age_chol <- with(tempData, lm(lnglyhb ~w_h_ratio + age+chol))
+mod.imp.wh_age_chol2_bmi2 <- with(tempData, lm(lnglyhb ~ w_h_ratio +age+chol+I(chol^2)+BMI+I(BMI^2)))
+
+summary(pool(mod.imp.wh_age_chol2_bmi2))
+pool.r.squared(mod.imp.wh_age_chol2_bmi2)
+pool.compare(mod.imp.wh_age_chol2_bmi2, mod.imp.wh_age_chol, method = "wald")
+```
+
+### Linear model compare
+```{r,fig.show='hold',out.width="50%"}
+plot(mod.wh_age_chol2_bmi2,which=c(1,2,3))
+# Cook's Distance Plot
+ols_plot_cooksd_chart(mod.wh_age_chol_bmi)  #id 2778, influential & outlier
+# DFFITS Plot
+ols_plot_dffits(mod.wh_age_chol_bmi)
+# Leverage Plot (outlier)
+ols_plot_resid_lev(mod.wh_age_chol_bmi) 
+
+dat %>% filter(id==2778)  # very high glyhb & chol in terms of her age
+dat_eli <- dat %>% filter(!id==2778)
+mod.eli <- lm(ln_glyhb~ w_h_ratio +age+chol+I(chol^2)+BMI+I(BMI^2), data=dat_eli)
+```
+
+
+```{r,echo=FALSE}
+library(knitr)
+table1<- matrix(c(summary(mod.wh)$r.squared, summary(mod.wh)$adj.r.squared, sqrt(mean(mod.wh$residuals^2)),AIC(mod.wh), BIC(mod.wh),
+                  summary(mod.age)$r.squared, summary(mod.age)$adj.r.squared, sqrt(mean(mod.age$residuals^2)),AIC(mod.age), BIC(mod.age),
+                  summary(mod.wh_age)$r.squared, summary(mod.wh_age)$adj.r.squared, sqrt(mean(mod.wh_age$residuals^2)), AIC(mod.wh_age), BIC(mod.wh_age),
+                  summary(mod.wh2_age)$r.squared, summary(mod.wh2_age)$adj.r.squared, sqrt(mean(mod.wh2_age$residuals^2)), AIC(mod.wh2_age), BIC(mod.wh2_age),
+                  summary(mod.wh2_age2)$r.squared, summary(mod.wh2_age2)$adj.r.squared, sqrt(mean(mod.wh2_age2$residuals^2)),AIC(mod.wh2_age2), BIC(mod.wh2_age2),
+                  summary(mod.spline_age)$r.squared, summary(mod.spline_age)$adj.r.squared, sqrt(mean(mod.spline_age$residuals^2)), AIC(mod.spline_age), BIC(mod.spline_age),
+                  summary(mod.nspline_age)$r.squared, summary(mod.nspline_age)$adj.r.squared, sqrt(mean(mod.nspline_age$residuals^2)), AIC(mod.nspline_age), BIC(mod.nspline_age),
+                  summary(mod.wh_age_chol)$r.squared, summary(mod.wh_age_chol)$adj.r.squared, sqrt(mean(mod.wh_age_chol$residuals^2)), AIC(mod.wh_age_chol), BIC(mod.wh_age_chol),
+                  summary(mod.wh_age_chol_bmi)$r.squared, summary(mod.wh_age_chol_bmi)$adj.r.squared, sqrt(mean(mod.wh_age_chol_bmi$residuals^2)), AIC(mod.wh_age_chol_bmi), BIC(mod.wh_age_chol_bmi),
+                  summary(mod.wh_age_chol2_bmi)$r.squared, summary(mod.wh_age_chol2_bmi)$adj.r.squared, sqrt(mean(mod.wh_age_chol2_bmi$residuals^2)), AIC(mod.wh_age_chol2_bmi), BIC(mod.wh_age_chol2_bmi),
+                  summary(mod.wh_age_chol2_bmi2)$r.squared, summary(mod.wh_age_chol2_bmi2)$adj.r.squared, sqrt(mean(mod.wh_age_chol2_bmi2$residuals^2)), AIC(mod.wh_age_chol2_bmi2), BIC(mod.wh_age_chol2_bmi2),
+                  summary(mod.eli)$r.squared, summary(mod.eli)$adj.r.squared, sqrt(mean(mod.eli$residuals^2)), AIC(mod.eli), BIC(mod.eli)), ncol=5,nrow=12, byrow=TRUE)
+colnames(table1)<- c("R^2", "Adjusted R^2", "Square root of MSE","AIC", "BIC")
+rownames(table1)<- c("ln_glyhb ~ w_h_ratio", 
+                     "ln_glyhb ~ age",
+                     "ln_glyhb ~ w_h_ratio + age", 
+                     "ln_glyhb ~ w_h_ratio + I(w_h_ratio^2) + age",
+                     "ln_glyhb ~ w_h_ratio + I(w_h_ratio^2) + age + I(age^2)",
+                     "ln_glyhb ~ bSpline(w_h_ratio) + age",
+                     "ln_glyhb ~ ns(w_h_ratio) + age",
+                     "ln_glyhb ~ w_h_ratio + age + chol",
+                     "ln_glyhb ~ w_h_ratio + age + chol+ bmi",
+                     "ln_glyhb ~ w_h_ratio + age + chol + I(chol^2)+ bmi",
+                     "ln_glyhb ~ w_h_ratio + age + chol+ I(chol^2) + bmi+I(bmi^2)",
+                     "ln_glyhb ~ eliminate influential point")
+table1 <- as.table(table1)
+kable(table1)
+```
+
+
+
+\textcolor{blue}{From the above table, 
+$E(log(glyhb)) = \beta_0 + \beta_1*waist/hipratio + \beta_2*age + \beta_3*chol + \beta_4*I(chol^2) + \beta_5*BMI + \beta_6*I(BMI^2)$ seems to be the better fit multiple linear regression model, largest $R^2$, adjusted $R^2$ and smallest AIC and BIC values.}
+
+
+
+
+
+
+```{r,out.width="80%"}
+ggplot(data=dat, aes(x=w_h_ratio,y=ln_glyhb))+
+  geom_point(alpha=0.5,col=ifelse(dat$female==1,"hot pink","blue"))+
+  geom_line(aes(y=predict(mod.wh_gender),col=ifelse(dat$female==1,"wh+female","wh+male")))+
+  geom_line(aes(y=predict(mod.wh),col="wh"))+
+  geom_line(aes(y=predict(mod.wh2),col="wh2"))+
+  scale_color_manual(name="Models", values = c("wh"="green", "wh+male"="blue", "wh+female"="hot pink",
+                                               "wh2"="black"))+
+  theme_bw()
+```
+
+
+
+
+
+### 2. Logistic, Multinomial, Ordinal models
+a) Logistic model-- have/don't have diabetes
+Have diabetes if value of glycosylated hemoglobin > 6.50 DCCT%, otherwise, don't have diabetes. Then, the outcome would be binomial, either have or don't have the diabetes.
+
+```{r,out.width="80%"}
+dat$diabetes = ifelse(dat$glyhb > 6.50, 1,0)  #logistic model
+
+mod_lg <- glm(diabetes ~ w_h_ratio, family=binomial(),data=dat)
+mod_lg2 <- glm(diabetes ~ w_h_ratio + I(w_h_ratio^2), family=binomial(), data=dat)
+tidy(mod_lg) %>% mutate('2.5%'=confint(mod_lg)[,1]) %>% mutate('97.5%'=confint(mod_lg)[,2])
+tidy(mod_lg2) %>% mutate('2.5%'=confint(mod_lg2)[,1]) %>% mutate('97.5%'=confint(mod_lg2)[,2])
+anova(mod_lg, mod_lg2, test="Chisq")
+
+
+#imputated models
+mod.imp.lg <- with(data = tempData, glm(diabetes ~ w_h_ratio, family=binomial()))
+mod.imp.lg_chol_bmi <- with(data=tempData, glm(diabetes ~ w_h_ratio+age+chol+BMI, family=binomial()))
+summary(pool(mod.imp.lg_chol_bmi))
+pool.compare(mod.imp.lg_chol_bmi, mod.imp.lg,method="likelihood")
+
+plot(dat$diabetes~dat$w_h_ratio,ylab="P(Diabetes)",xlab="waist/hip ratio", col="black")
+lines(mod_lg$fitted.values~dat$w_h_ratio,type='p',col='blue') 
+lines(mod_lg2$fitted.values~ dat$w_h_ratio, type='p', col="red")
+legend('bottomright',legend=c("linear","quadratic"),pch=c(1,1),col=c("blue","red"))
+```
+
+
+```{r}
+mod_lg3 <- glm(diabetes ~ w_h_ratio + age, family=binomial(),data=dat)
+mod_lg4<- glm(diabetes ~ w_h_ratio + age + w_h_ratio*age, family=binomial(),data=dat)
+mod_lg5 <- glm(diabetes ~ w_h_ratio + age + chol + BMI, family=binomial(), data=dat)
+mod_lg6 <- glm(diabetes ~ w_h_ratio+age+chol+I(chol^2)+BMI, family = binomial(),data=dat)
+mod_lg7 <- glm(diabetes ~ w_h_ratio+age+chol+I(chol^2)+BMI+I(BMI^2),family=binomial(),data=dat)
+mod_int1 <- glm(diabetes ~ w_h_ratio +age+chol+BMI + w_h_ratio*chol, family = binomial(),data=dat) #no need
+mod_int2 <- glm(diabetes ~ w_h_ratio + age + chol + BMI+w_h_ratio * BMI, family = binomial(),data=dat) #no need
+```
+
+```{r,eval=FALSE}
+library(ResourceSelection)
+library(LogisticDx)
+tidy(mod_lg3) %>% mutate('2.5%'=confint(mod_lg3)[,1]) %>% mutate('97.5%'=confint(mod_lg3)[,2])
+tidy(mod_lg4) %>% mutate('2.5%'=confint(mod_lg4)[,1]) %>% mutate('97.5%'=confint(mod_lg4)[,2])  #no need
+tidy(mod_lg5)
+tidy(mod_lg6)
+tidy(mod_lg7)
+tidy(mod_int1) #no need
+tidy(mod_int2) # no need
+
+locoef<-exp(coef(mod_lg5)[2]*0.1)
+exp(log(locoef) + c(-1, 1)*1.96*0.1*2.037622)
+
+hoslem.test(dat$diabetes, fitted(mod_lg5), g=10)
+gof(mod_lg5)
+
+#imputated model
+mod.imp.lg3 <- with(data = tempData, glm(diabetes~ w_h_ratio+age, family = binomial()))
+mod.imp.lg5 <- with(data=tempData, glm(diabetes ~ w_h_ratio +age+ chol+BMI, family = binomial()))
+summary(pool(mod.imp.lg5))
+pool.compare(mod.imp.lg5, mod.imp.lg3, method = "likelihood")
+```
+
+```{r,echo=FALSE}
+table2<- matrix(c(AIC(mod_lg), BIC(mod_lg), PseudoR2(mod_lg), 
+                  AIC(mod_lg3), BIC(mod_lg3), PseudoR2(mod_lg3),
+                  AIC(mod_lg5), BIC(mod_lg5),PseudoR2(mod_lg5),
+                  AIC(mod_lg6),BIC(mod_lg6), PseudoR2(mod_lg6),
+                  AIC(mod_lg7), BIC(mod_lg7), PseudoR2(mod_lg7)
+                  ), ncol=3,nrow=5, byrow=TRUE)
+colnames(table2)<- c("AIC", "BIC", "Pseudo-R2")
+rownames(table2)<- c("logit(P_diabetes) ~ w_h_ratio", 
+                     "logit(P_diabetes) ~ w_h_ratio + age",
+                     "logit(P_diabetes) ~ w_h_ratio+ age+chol+bmi",
+                     "logit(P_diabetes) ~ w_h_ratio+age+chol+I(chol^2)+bmi",
+                     "logit(P_diabetes) ~ w_h_ratio + age + chol + I(chol^2)+ bmi+I(bmi^2)")
+table1 <- as.table(table2)
+kable(table2)
+```
+
+
+\textcolor{blue}{For the logistic model, $logit(P_{diabetes})= \beta_0 + \beta_1*waist/hip ratio + \beta_2*age+\beta_3*chol+\beta_4*BMI$ is the best one with smallest AIC and BIC values. }
+
+
+
+
+### Multinomial Models
+Based on the 2010 American Diabetes Association Standards of Medical Care in Diabetes, HbA1C < 5.7$\%$ is diagnosed as normal, 5.7-6.4$\%$ is diagnosed as prediabetes and > 6.5$\%$ is diagnosed as diabetes. 
+```{r}
+library(nnet)
+# outcome =1: normal
+# outcome =2: prediabetes
+# outcome =3: diabetes
+
+dat$outcome[dat$glyhb < 5.70] <- 1
+dat$outcome[dat$glyhb >=5.70 & dat$glyhb <=6.50] <-2
+dat$outcome[dat$glyhb >6.50] <-3
+
+mod.mul_wh <- multinom(outcome ~ w_h_ratio, data=dat)
+summ.MNfit(mod.mul_wh)
+mod.mul_wh_age <- multinom(outcome ~ w_h_ratio+age, data=dat)
+summ.MNfit(mod.mul_wh_age)
+mod.mul_int <- multinom(outcome~ w_h_ratio + age+w_h_ratio*age, data=dat)
+summ.MNfit(mod.mul_int)
+anova(mod.mul_wh_age, mod.mul_int, test="Chisq")
+
+mod.mul_wh_age_chol_bmi <- multinom(outcome ~ w_h_ratio + age + chol + BMI, data=dat)
+summ.MNfit(mod.mul_wh_age_chol_bmi)
+co2vs1<-exp(coef(mod.mul_wh_age_chol_bmi)[1,2]*0.1)
+co3vs1<-exp(coef(mod.mul_wh_age_chol_bmi)[2,2]*0.1)
+exp(log(co2vs1) + c(-1, 1)*1.96*0.1*summary(mod.mul_wh_age_chol_bmi)$standard.errors[1,2])
+exp(log(co3vs1) + c(-1, 1)*1.96*0.1*summary(mod.mul_wh_age_chol_bmi)$standard.errors[2,2])
+anova(mod.mul_wh_age, mod.mul_wh_age_chol_bmi, test="Chisq")
+
+mod.mul_wh_age_chol2_bmi <- multinom(outcome ~ w_h_ratio + age + chol+I(chol^2) + BMI, data=dat) #no need
+anova(mod.mul_wh_age_chol_bmi,mod.mul_wh_age_chol2_bmi, test="Chisq")  #no need
+mod.mul_wh_age_chol2_bmi2 <- multinom(outcome ~ w_h_ratio + age + chol+I(chol^2) + BMI+I(BMI^2), data=dat) #no need
+anova(mod.mul_wh_age_chol_bmi,mod.mul_wh_age_chol2_bmi2, test="Chisq") #no need
+
+#imputated models
+mod.imp.mul_wh <- with(data=tempData, multinom(outcome ~ w_h_ratio))
+mod.imp.mul_wh_age <- with(data=tempData,multinom(outcome~w_h_ratio + age))
+mod.imp.mul_wh_age_chol_bmi <- with(data=tempData, multinom(outcome ~ w_h_ratio +age+chol+BMI))
+```
+
+```{r}
+table_multi<- matrix(c(AIC(mod.mul_wh), BIC(mod.mul_wh),
+                  AIC(mod.mul_wh_age ),BIC(mod.mul_wh_age ),
+                  AIC(mod.mul_int), BIC(mod.mul_int),
+                  AIC(mod.mul_wh_age_chol_bmi), BIC(mod.mul_wh_age_chol_bmi)
+                  ), ncol=2,nrow=4, byrow=TRUE)
+colnames(table_multi)<- c("AIC", "BIC")
+rownames(table_multi)<- c("log(RRR) ~ w_h_ratio",
+                     "log(RRR) ~ w_h_ratio + age",
+                     "log(RRR) ~ w_h_ratio + age+w_h_ratio*age",
+                     "log(RRR) ~ w_h_ratio + age + chol + BMI")
+
+kable(table_multi)
+```
+
+\textcolor{blue}{
+From likelihood ratio test, p=0.51 >0.05, fail to reject null hypothesis which is reduced model is sufficient, thus, no need to include interaction term here. For the multinomial regression model, 
+$\hat{log(lnglyhb)} = \beta_0 + \beta_1*waist/hip ratio + \beta_2*age+\beta_4*chol+\beta_5*BMI $ is the best one. 
+}
+
+
+
+
+```{r,out.width="80%"}
+plot(mod.mul_wh$fitted.values[,1][order(dat$w_h_ratio)] ~ sort(dat$w_h_ratio), type="l", col="dodgerblue", xlab=c("Waist/hip ratio"), ylab="Predicted Probability", ylim=c(0,1), main="Fitted Values, o1=Blue, o2=Pink, o3=Green")
+points(mod.mul_wh$fitted.values[,2][order(dat$w_h_ratio)] ~ sort(dat$w_h_ratio), type="l", col="magenta")
+points(mod.mul_wh$fitted.values[,3][order(dat$w_h_ratio)]~sort(dat$w_h_ratio), type="l", col="green")
+```
+
+
+### Ordinal Model
+```{r}
+library(VGAM)
+# outcome =1: normal
+# outcome =2: prediabetes
+# outcome =3: diabetes
+
+ord.wh <- vglm(outcome ~ w_h_ratio, cumulative(parallel=TRUE, reverse=TRUE), data=dat)
+ord.wh_age <- vglm(outcome~ w_h_ratio + age, cumulative(parallel=TRUE, reverse=TRUE), data=dat)
+ord.int <- vglm(outcome~w_h_ratio + age + w_h_ratio *age, cumulative(parallel = TRUE, reverse = TRUE),data=dat)
+ord.wh_age_chol_bmi <- vglm(outcome ~ w_h_ratio + age + chol+ BMI, cumulative(parallel = TRUE, reverse = TRUE), data=dat)
+ord.wh_age_chol2_bmi <- vglm(outcome ~ w_h_ratio + age + chol+I(chol^2)+ BMI, cumulative(parallel = TRUE, reverse = TRUE), data=dat)  #no need
+ord.wh_age_chol2_bmi2 <- vglm(outcome ~ w_h_ratio + age + chol+I(chol^2)+ BMI+I(BMI^2), cumulative(parallel = TRUE, reverse = TRUE), data=dat)  #no need
+
+summary(ord.int)
+
+summary(ord.wh_age_chol_bmi)
+confint(ord.wh_age_chol_bmi)
+exp(coef(ord.wh_age_chol_bmi)[3]) 
+or2vs1<-exp(coef(ord.wh_age_chol_bmi)[3]*0.1)
+exp(coef(ord.wh_age_chol_bmi)[3]*0.1 + c(-1, 1)*1.96*0.1*sqrt(vcov(ord.wh_age_chol_bmi)[3,3]))
+```
+
+```{r}
+table_ord<- matrix(c(AIC(ord.wh), BIC(ord.wh),
+                  AIC(ord.wh_age),BIC(ord.wh_age),
+                  AIC(ord.int), BIC(ord.int),
+                  AIC(ord.wh_age_chol_bmi), BIC(ord.wh_age_chol_bmi),
+                  AIC(ord.wh_age_chol2_bmi),BIC(ord.wh_age_chol2_bmi),
+                  AIC(ord.wh_age_chol2_bmi2), BIC(ord.wh_age_chol2_bmi2)
+                  ), ncol=2,nrow=6, byrow=TRUE)
+colnames(table_ord)<- c("AIC", "BIC")
+rownames(table_ord)<- c("log(OR) ~ w_h_ratio", 
+                     "log(OR) ~ w_h_ratio + age",
+                     "log(OR) ~ w_h_ratio + age + w_h_ratio*age",
+                     "log(OR) ~ w_h_ratio+ age+chol+bmi",
+                     "log(OR) ~ w_h_ratio+age+chol+I(chol^2)+bmi",
+                     "log(OR) ~ w_h_ratio + age + chol + I(chol^2)+ bmi+I(bmi^2)")
+table1 <- as.table(table_ord)
+kable(table_ord)
+```
+
+```{r}
+# check for proportional odds assumption 
+dat$indicator3 <- ifelse(dat$outcome==3, 1,0) 
+mod.3v12 <- glm(indicator3 ~ w_h_ratio +age+chol+BMI, family = binomial, data = dat)
+summary(mod.3v12)
+dat$indicator23 <- ifelse(dat$outcome==1, 0 ,1)
+mod.32v1 <- glm(indicator23 ~ w_h_ratio + age+chol+BMI, family=binomial,data=dat )
+#examining 95% CIs for the two coefficients
+coef(mod.3v12)[2] + c(-1,1)*1.96*sqrt(vcov(mod.3v12)[2,2])
+coef(mod.3v12)[3] + c(-1,1)*1.96*sqrt(vcov(mod.3v12)[3,3])
+coef(mod.3v12)[4] + c(-1,1)*1.96*sqrt(vcov(mod.3v12)[4,4])
+coef(mod.3v12)[5] + c(-1,1)*1.96*sqrt(vcov(mod.3v12)[5,5])
+
+coef(mod.32v1)[2] + c(-1,1)*1.96*sqrt(vcov(mod.32v1)[2,2])
+coef(mod.32v1)[3] + c(-1,1)*1.96*sqrt(vcov(mod.32v1)[3,3])
+coef(mod.32v1)[4] + c(-1,1)*1.96*sqrt(vcov(mod.32v1)[4,4])
+coef(mod.32v1)[5] + c(-1,1)*1.96*sqrt(vcov(mod.32v1)[5,5])
+# CI’s for all variables' beta coefficients overlap, so proportional odds assumption holds
+```
+
+```{r,eval=FALSE}
+# Another way
+# Fitting a generalized ordinal model (without the proportional odds assumption)
+mod.no_asp <- vglm(outcome ~ w_h_ratio + age + chol+BMI, cumulative(parallel=FALSE, reverse=T), data=dat)
+# Conducting the likelihood ratio test
+pchisq(deviance(ord.wh_age_chol_bmi) - deviance(mod.no_asp), df=df.residual(ord.wh_age_chol_bmi)-df.residual(mod.no_asp), lower.tail=F)
+```
+
+\textcolor{blue}{
+Interaction term is not needed. Also, from the p-value=0.350 >0.05 for the LRT, there's no statistical evidence for rejecting our assumption that the outcome categories share proportional odds for these data. Therefore, proportional odds model is adequate. 
+}
+
+
+
+
+
+
+### 3. Poisson models
+
+\textcolor{blue}{We don't need Poission model for our dataset. }
+
+
+
+
+
+
+## Model Summary
+```{r}
+table3<- matrix(c(AIC(mod.wh_age_chol2_bmi2), BIC(mod.wh_age_chol2_bmi2),
+                  AIC(mod_lg5),BIC(mod_lg5),
+                  AIC(mod.mul_wh_age_chol_bmi), BIC(mod.mul_wh_age_chol_bmi),
+                  AIC(ord.wh_age_chol_bmi), BIC(ord.wh_age_chol_bmi)
+                  ), ncol=2,nrow=4, byrow=TRUE)
+colnames(table3)<- c("AIC", "BIC")
+rownames(table3)<- c("ln(glyhb) ~ w_h_ratio + age + chol + chol^2+ BMI + BMI^2",
+                     "logit(P_diabetes) ~ w_h_ratio + age + chol + BMI",
+                     "multinomial(P_diabetes) ~ w_h_ratio + age + chol + BMI",
+                     "ordinal(P_diabetes) ~ w_h_ratio + age + chol + BMI")
+table1 <- as.table(table3)
+kable(table3)
+```
+
+
+
+
+
+
+
+
+
+
+
+
